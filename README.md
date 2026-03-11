@@ -68,6 +68,30 @@ Example output for XOR:
 1,1
 ```
 
+## Letter Recognition
+
+The repo ships configured for uppercase letter recognition (A–Z) using 5×7 pixel bitmaps (35 inputs, 26 outputs).
+
+```bash
+# 1. Build both tools
+g++ -o nn nn.cpp -lm
+g++ -o gen_data gen_data.cpp
+
+# 2. Generate training data (26 perfect-font samples)
+./gen_data          # writes data.json
+
+# 3. Train
+./nn --train        # MSE converges toward 0 over 50 000 epochs
+
+# 4. Predict — prints the recognised letter and confidence
+./nn --predict inputs.csv
+# A  (0.9921)
+# B  (0.9887)
+# C  (0.9903)
+```
+
+`inputs.csv` contains flattened 5×7 pixel rows for A, B, and C. Predict mode prints the argmax letter when the output layer has exactly 26 neurons; all other architectures keep the original numeric output.
+
 ## Extending
 
 Change `layers` in `config.json` to use a different architecture — no code changes needed. For example, a deeper network:

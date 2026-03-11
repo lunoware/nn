@@ -520,11 +520,21 @@ int main(int argc, char* argv[]) {
         auto rows = parseCSV(argv[2]);
         for (auto& row : rows) {
             auto out = net.predict(row);
-            for (int i = 0; i < (int)out.size(); i++) {
-                if (i > 0) printf(",");
-                printf("%.6f", out[i]);
+            // find argmax
+            int best = 0;
+            for (int i = 1; i < (int)out.size(); i++)
+                if (out[i] > out[best]) best = i;
+
+            if ((int)out.size() == 26) {
+                printf("%c  (%.4f)\n", 'A' + best, out[best]);
+            } else {
+                // original numeric output for non-26-class models
+                for (int i = 0; i < (int)out.size(); i++) {
+                    if (i > 0) printf(",");
+                    printf("%.6f", out[i]);
+                }
+                printf("\n");
             }
-            printf("\n");
         }
 
     } else {
