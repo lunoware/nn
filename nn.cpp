@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <memory>
+#include <algorithm>
+#include <unistd.h>
 
 // ---- Data Structs ----
 
@@ -308,6 +310,102 @@ class Network {
     std::vector<std::unique_ptr<Connection>> allConnections;
     std::vector<Layer>                        layers;
     double learningRate;
+    std::vector<double>                       lossHistory;
+
+    // Map activation [0,1] to a 256-color ANSI index (thermal: navy→cyan→yellow→red)
+    static int neuronColor(double v) {
+        if (v < 0.0) v = 0.0;
+        if (v > 1.0) v = 1.0;
+        static const int pal[] = {17, 19, 21, 27, 33, 51, 122, 190, 226, 220, 214, 208, 202, 196};
+        int idx = (int)(v * 13.0 + 0.5);
+        if (idx > 13) idx = 13;
+        return pal[idx];
+    }
+
+    void renderFrame(int epoch, int totalEpochs, double loss) {
+        printf("\033[H");  // cursor to top-left (screen cleared before training loop)
+
+        printf("\033[1;36m Neural Network\033[0m"
+               "  epoch \033[1m%d\033[0m/%d  mse \033[33m%.6f\033[0m\033[K\n\n",
+               epoch, totalEpochs, loss);
+
+        // Build per-layer info
+        struct LInfo { std::vector<Neuron*> ns; int gc, gr; };
+        std::vector<LInfo> infos;
+        for (auto& lay : layers) {
+            LInfo info;
+            for (auto* n : lay.neurons) if (!n->isBias) info.ns.push_back(n);
+            int cnt = std::max((int)info.ns.size(), 1);
+            info.gc = (int)ceil(sqrt((double)cnt));
+            info.gr = (cnt + info.gc - 1) / info.gc;
+            infos.push_back(std::move(info));
+        }
+
+        int nL = (int)infos.size();
+        int maxR = 0;
+        for (auto& info : infos) maxR = std::max(maxR, info.gr);
+
+        // Layer labels (centered over each grid)
+        for (int li = 0; li < nL; li++) {
+            if (li > 0) printf("    ");
+            int w = infos[li].gc * 2;
+            char lbl[24];
+            snprintf(lbl, sizeof(lbl), "L%d(%d)", li, (int)infos[li].ns.size());
+            int ll = (int)strlen(lbl), lp = (w - ll) / 2, rp = w - ll - lp;
+            for (int i = 0; i < lp; i++) printf(" ");
+            printf("\033[90m%s\033[0m", lbl);
+            for (int i = 0; i < rp; i++) printf(" ");
+        }
+        printf("\033[K\n");
+
+        // Neuron grids, row by row
+        for (int row = 0; row < maxR; row++) {
+            bool mid = (row == maxR / 2);
+            for (int li = 0; li < nL; li++) {
+                if (li > 0) { printf(mid ? " \033[90m>>\033[0m " : "    "); }
+                auto& info = infos[li];
+                if (row < info.gr) {
+                    for (int col = 0; col < info.gc; col++) {
+                        int idx = row * info.gc + col;
+                        if (idx < (int)info.ns.size())
+                            printf("\033[48;5;%dm  \033[0m", neuronColor(info.ns[idx]->value));
+                        else
+                            printf("  ");
+                    }
+                } else {
+                    for (int col = 0; col < info.gc; col++) printf("  ");
+                }
+            }
+            printf("\033[K\n");
+        }
+        printf("\n");
+
+        // Progress bar
+        const int bw = 40;
+        double pct = totalEpochs > 0 ? (double)epoch / totalEpochs : 0.0;
+        int fill = (int)(pct * bw);
+        printf("progress \033[32m");
+        for (int i = 0; i < bw; i++) printf(i < fill ? "█" : "\033[90m░\033[32m");
+        printf("\033[0m \033[1m%.1f%%\033[0m\033[K\n", pct * 100.0);
+
+        // Loss sparkline
+        if (!lossHistory.empty()) {
+            static const char* sp[] = {"▁","▂","▃","▄","▅","▆","▇","█"};
+            double mn = *std::min_element(lossHistory.begin(), lossHistory.end());
+            double mx = *std::max_element(lossHistory.begin(), lossHistory.end());
+            int hn = (int)lossHistory.size(), show = std::min(hn, bw);
+            printf("loss     \033[33m");
+            for (int i = hn - show; i < hn; i++) {
+                double norm = (mx > mn) ? (lossHistory[i] - mn) / (mx - mn) : 0.5;
+                int si = (int)(norm * 7.0 + 0.5);
+                if (si < 0) si = 0; if (si > 7) si = 7;
+                printf("%s", sp[si]);
+            }
+            printf("\033[0m\033[K\n");
+        }
+
+        fflush(stdout);
+    }
 
 public:
     void build(const Config& cfg) {
@@ -399,6 +497,11 @@ public:
 
     void train(const Config& cfg, const TrainingData& td) {
         int nSamples = (int)td.inputs.size();
+        bool viz = isatty(STDOUT_FILENO);
+        int renderEvery = std::max(1, cfg.epochs / 400);
+
+        if (viz) printf("\033[?25l\033[2J\033[H");  // hide cursor, clear screen
+
         for (int epoch = 0; epoch <= cfg.epochs; epoch++) {
             double totalLoss = 0;
             for (int ex = 0; ex < nSamples; ex++) {
@@ -416,9 +519,23 @@ public:
 
                 backward(td.targets[ex]);
             }
-            if (epoch % 1000 == 0) {
-                printf("Epoch %d | MSE: %.6f\n", epoch, totalLoss / nSamples);
+
+            double avgLoss = totalLoss / nSamples;
+            if (viz) {
+                if (epoch % renderEvery == 0) {
+                    lossHistory.push_back(avgLoss);
+                    renderFrame(epoch, cfg.epochs, avgLoss);
+                }
+            } else {
+                if (epoch % 1000 == 0)
+                    printf("Epoch %d | MSE: %.6f\n", epoch, avgLoss);
             }
+        }
+
+        if (viz) {
+            lossHistory.push_back(lossHistory.empty() ? 0 : lossHistory.back());
+            renderFrame(cfg.epochs, cfg.epochs, lossHistory.back());
+            printf("\033[?25h\n");  // show cursor
         }
     }
 
